@@ -1,6 +1,6 @@
 # Multi-stage build for AutoClipper
 # Stage 1: Builder - install dependencies
-FROM python:3.12-slim as builder
+FROM python:3.12-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
@@ -21,7 +21,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 # Stage 2: Runtime - minimal production image
-FROM python:3.12-slim as runtime
+FROM python:3.12-slim AS runtime
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

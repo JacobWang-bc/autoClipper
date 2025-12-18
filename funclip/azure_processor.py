@@ -990,7 +990,11 @@ class AzureVideoIndexerProcessor:
                 sent_end = sentence.get("end", 0)
                 # Check if sentence overlaps with segment time range
                 if sent_start < end_sec and sent_end > start_sec:
-                    transcript_text += sentence.get("text", "") + " "
+                    text = sentence.get("text", "")
+                    # Handle case where text may be a list (modified by generate_srt_clip)
+                    if isinstance(text, list):
+                        text = " ".join(text)
+                    transcript_text += text + " "
 
             segments.append(
                 {
@@ -1070,7 +1074,11 @@ class AzureVideoIndexerProcessor:
                 sent_end = sentence.get("end", 0)
                 # Check if sentence overlaps with segment time range
                 if sent_start < end_sec and sent_end > start_sec:
-                    transcript_text += sentence.get("text", "") + " "
+                    text = sentence.get("text", "")
+                    # Handle case where text may be a list (modified by generate_srt_clip)
+                    if isinstance(text, list):
+                        text = " ".join(text)
+                    transcript_text += text + " "
 
             segments.append(
                 {

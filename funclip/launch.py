@@ -312,7 +312,11 @@ if __name__ == "__main__":
         has_state = video_state is not None or audio_state is not None
         has_manual_input = video_input is not None and srt_text and srt_text.strip()
 
-        MAX_SEGMENTS = 10
+        try:
+            MAX_SEGMENTS = int(os.getenv("MAX_SEGMENTS", "30"))
+        except ValueError:
+            logging.warning("Invalid MAX_SEGMENTS value in environment, using default (30)")
+            MAX_SEGMENTS = 30
 
         if not has_state and not has_manual_input:
             logging.error("No valid input: neither ASR state nor manual input")

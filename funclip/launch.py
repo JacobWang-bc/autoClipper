@@ -174,8 +174,13 @@ if __name__ == "__main__":
     # Validate authentication configuration
     if not bearer_token and not subscription_key:
         raise ValueError(
-            "Authentication missing. Set environment variables in .env file:\n"
-            "Option 1 (Recommended): ARM Auto-generation\n"
+            "Authentication missing. Set environment variables in .env file:\n\n"
+            "=== Option 1: Trial Account (Free) ===\n"
+            "  - AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY=<your-api-key>\n"
+            "  - AZURE_VIDEO_INDEXER_ACCOUNT_ID=<your-account-id>\n"
+            "  - AZURE_VIDEO_INDEXER_LOCATION=trial\n"
+            "  Get API key from: https://api-portal.videoindexer.ai\n\n"
+            "=== Option 2: ARM Account (Paid) ===\n"
             "  - ARM_SUBSCRIPTION_ID=<your-subscription-id>\n"
             "  - ARM_RESOURCE_GROUP=<your-resource-group>\n"
             "  - ARM_ACCOUNT_NAME=<your-account-name>\n"
@@ -183,11 +188,8 @@ if __name__ == "__main__":
             "    a) AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID (Service Principal)\n"
             "    b) USE_INTERACTIVE_AUTH=true (Browser login)\n"
             "    c) USE_DEVICE_CODE_AUTH=true (Device code)\n\n"
-            "Option 2: Manual Bearer Token\n"
-            "  - AZURE_VIDEO_INDEXER_BEARER_TOKEN=<your-token>\n\n"
-            "Option 3: Classic (Legacy)\n"
-            "  - AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY=<your-key>\n"
-            "  - AZURE_VIDEO_INDEXER_ACCOUNT_ID=<your-account-id>\n"
+            "=== Option 3: Manual Bearer Token ===\n"
+            "  - AZURE_VIDEO_INDEXER_BEARER_TOKEN=<your-token>\n"
         )
 
     # Token refresh callback for automatic token renewal on 401 errors

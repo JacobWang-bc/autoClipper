@@ -156,13 +156,36 @@ class AzureVideoIndexerProcessor:
     def _get_access_token(self) -> str:
         """
         Return data-plane access token.
-        Requires bearer_token pre-generated via ARM generateAccessToken API.
+        Supports two modes:
+        1. ARM mode: Uses pre-generated bearer_token
+        2. Classic mode: Uses subscription_key to call Auth API (for Trial accounts)
         """
-        if not self.bearer_token:
-            raise ValueError(
-                "bearer_token is required. Generate it via ARM generateAccessToken and pass it to the processor."
-            )
-        return self.bearer_token
+        # If we already have a bearer token, use it
+        if self.bearer_token:
+            return self.bearer_token
+
+        # Classic mode: Use subscription key to get access token from Auth API
+        if self.subscription_key and self.account_id:
+            url = f"https://api.videoindexer.ai/Auth/{self.location}/Accounts/{self.account_id}/AccessToken"
+            headers = {"Ocp-Apim-Subscription-Key": self.subscription_key}
+            params = {"allowEdit": "true"}
+
+            logging.info(f"Getting access token via classic Auth API for location: {self.location}")
+            response = requests.get(url, headers=headers, params=params)
+            response.raise_for_status()
+
+            # The API returns the token as a quoted string, remove quotes
+            token = response.text.strip().strip('"')
+            self.bearer_token = token  # Cache for subsequent calls
+            logging.info("Successfully obtained access token via classic Auth API")
+            return token
+
+        raise ValueError(
+            "Authentication failed. Either provide:\n"
+            "1. bearer_token (ARM mode), or\n"
+            "2. subscription_key + account_id (Classic/Trial mode)\n"
+            "For Trial accounts, get subscription key from: https://api-portal.videoindexer.ai"
+        )
 
     def _auth(self, access_token: str) -> Tuple[Dict, Dict]:
         """

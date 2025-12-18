@@ -1,7 +1,59 @@
 
-### Configuration Setup
+# AutoClipper - Video and Audio Clipping Tool
 
-FunClip supports Azure Video Indexer for audio/video processing. Create a `.env` file in the project root directory to configure authentication credentials.
+AutoClipper is an AI-powered video and audio intelligent clipping tool that supports Azure Video Indexer and Gemini AI.
+
+## 🚀 Docker Deployment (Recommended)
+
+### Quick Start
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/your-username/autoClipper.git
+cd autoClipper
+
+# 2. Configure environment variables
+cp .env.example .env  # Copy example configuration file
+# Edit .env file with your API keys
+
+# 3. Build and start
+docker-compose build
+docker-compose up -d
+
+# 4. Access the application
+# Local access: http://localhost:8089
+```
+
+### Common Commands
+
+```bash
+# Start service
+docker-compose up -d
+
+# Stop service
+docker-compose down
+
+# View logs
+docker-compose logs -f
+
+# Restart service
+docker-compose restart
+
+# Rebuild
+docker-compose build --no-cache
+```
+
+### Deployment Notes
+
+- **Port Configuration**: Listens on port 8089 by default, can be modified in `docker-compose.yml`
+- **Data Persistence**: Files are stored in the `./data` directory
+- **Firewall**: Ensure server firewall allows access to the respective ports
+- **Resource Requirements**: At least 2GB RAM recommended, video processing is resource-intensive
+- **Network Access**: Ensure container can access Azure and Gemini APIs
+
+## 📋 配置设置
+
+FunClip支持Azure Video Indexer进行音视频处理。在项目根目录创建 `.env` 文件来配置认证凭据。
 
 #### 🎯 Option 1: Free Trial Account (Recommended for new users)
 
@@ -71,5 +123,73 @@ If both `GRADIO_USERNAME` and `GRADIO_PASSWORD` are set, users must enter the co
 - Gemini API key is used for AI-powered intelligent clipping features
 - `MAX_SEGMENTS` controls the maximum number of video segments that can be displayed (default: 10)
 
+## 🔧 Local Development
+
+To run in a local development environment:
+
+```bash
+
+uv sync
+
+# Start the application
+python funclip/launch.py --listen --port 8080
+```
+
+## 🚨 Troubleshooting
+
+### Docker Issues
+
+**Build Failure**
+```bash
+# Clean Docker cache
+docker system prune -f
+
+# Rebuild
+docker-compose build --no-cache
+```
+
+**Port Conflict**
+- Check if other services are using port 8089
+- Modify port mapping in `docker-compose.yml`
+
+**Permission Issues**
+- Ensure user has read/write permissions for `./data` and `./.gradio_temp` directories
+- Check Docker Desktop permission settings
+
+### Application Issues
+
+**Cannot Access**
+- Check if container is running: `docker-compose ps`
+- Verify port mapping is correct
+- Check firewall settings
+
+**API Connection Failure**
+- Confirm API keys in `.env` file are correct
+- Check network connectivity to Azure and Gemini services
+- View application logs: `docker-compose logs -f`
+
+**File Upload Failure**
+- Check `./.gradio_temp` directory permissions
+- Confirm uploaded file formats are supported
+
+## 📁 Project Structure
+
+```
+autoClipper/
+├── funclip/                 # Main application code
+│   ├── launch.py           # Application entry point
+│   ├── azure_processor.py  # Azure integration
+│   ├── videoclipper.py     # Video clipping logic
+│   └── llm/               # AI functionality
+├── data/                   # Data storage directory
+├── .gradio_temp/          # Temporary files directory
+├── Dockerfile             # Docker image configuration
+├── docker-compose.yml    # Docker orchestration configuration
+└── .env                   # Environment configuration (create manually)
+```
+
+## 🤝 Contributing
+
+Welcome to submit Issues and Pull Requests!
 
 <a name="Usage"></a>

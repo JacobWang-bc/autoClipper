@@ -1,0 +1,62 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info
+*.egg
+.eggs
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.coverage
+
+# Virtual environments
+.venv
+venv
+env
+.env
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+*.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+.gradio_temp/
+
+# Build artifacts
+build/
+dist/
+*.spec
+*.rar
+
+# Data directories (will be mounted as volumes)
+data/
+
+# Documentation
+*.md
+!README.md
+LICENSE
+
+# Test files
+tests/
+*.test.py
+
+# Node (if added later)
+node_modules/

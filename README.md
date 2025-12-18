@@ -51,10 +51,8 @@ docker-compose build --no-cache
 - **Resource Requirements**: At least 2GB RAM recommended, video processing is resource-intensive
 - **Network Access**: Ensure container can access Azure and Gemini APIs
 
-## 📋 配置设置
-
-FunClip支持Azure Video Indexer进行音视频处理。在项目根目录创建 `.env` 文件来配置认证凭据。
-
+## 📋 config 
+FunClip supports Azure Video Indexer for audio/video processing. Create a `.env` file in the project root directory to configure authentication credentials.
 #### 🎯 Option 1: Free Trial Account (Recommended for new users)
 
 ```env

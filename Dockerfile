@@ -46,9 +46,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 COPY . .
 
 # Create necessary directories and set permissions
-# Only chown directories that need write access, not the entire /app (too slow)
-RUN mkdir -p .gradio_temp data && \
-    chown -R appuser:appuser .gradio_temp data
+# Include both root .gradio_temp and funclip/.gradio_temp directories
+RUN mkdir -p .gradio_temp funclip/.gradio_temp data && \
+    chown -R appuser:appuser .gradio_temp funclip/.gradio_temp data
 
 # Switch to non-root user
 USER appuser

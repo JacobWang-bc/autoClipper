@@ -34,6 +34,15 @@ except ImportError:
         "python-dotenv not installed. Reading from system environment only. Install with: pip install python-dotenv"
     )
 
+# Global MAX_SEGMENTS configuration - read from environment variable
+# This controls how many video segments can be displayed in the UI
+# Must be defined AFTER load_dotenv() to read from .env file
+try:
+    MAX_SEGMENTS = int(os.getenv("MAX_SEGMENTS", "10"))
+except ValueError:
+    logging.warning("Invalid MAX_SEGMENTS value in environment, using default (10)")
+    MAX_SEGMENTS = 10
+
 
 def generate_arm_token(sub_id, rg, account):
     """
@@ -314,11 +323,7 @@ if __name__ == "__main__":
         has_state = video_state is not None or audio_state is not None
         has_manual_input = video_input is not None and srt_text and srt_text.strip()
 
-        try:
-            MAX_SEGMENTS = int(os.getenv("MAX_SEGMENTS", "30"))
-        except ValueError:
-            logging.warning("Invalid MAX_SEGMENTS value in environment, using default (30)")
-            MAX_SEGMENTS = 30
+        # Use global MAX_SEGMENTS (defined at module level from env var)
 
         if not has_state and not has_manual_input:
             logging.error("No valid input: neither ASR state nor manual input")
@@ -441,7 +446,7 @@ if __name__ == "__main__":
         logging.info(f"Returning {len(video_paths)} video paths")
         logging.info("=" * 60)
 
-        # Return: videos (10) + transcripts (10) + message (1) = 21 items
+        # Return: videos (MAX_SEGMENTS) + transcripts (MAX_SEGMENTS) + message (1)
         results = []
         # Add video paths
         for i in range(MAX_SEGMENTS):
@@ -506,7 +511,7 @@ if __name__ == "__main__":
                     )
                     audio_input = gr.Audio(label="Audio Input")
                 with gr.Column():
-                    recog_button = gr.Button("ASR (costs money)", variant="primary")
+                    recog_button = gr.Button("1️⃣ ASR (costs money)", variant="stop")
                 video_srt_output = gr.Textbox(
                     label="SRT Subtitles (can paste manually to skip ASR)",
                     lines=10,
@@ -557,11 +562,11 @@ if __name__ == "__main__":
                                     type="password",
                                 )
                             llm_button = gr.Button(
-                                "LLM Inference (recognize first, need Gemini API key)",
-                                variant="primary",
+                                "2️⃣ LLM Inference ",
+                                variant="stop",
                             )
                         llm_result = gr.Textbox(label="LLM Clipper Result", lines=20)
-                        llm_clip_button = gr.Button("🎬 AI Clip", variant="primary")
+                        llm_clip_button = gr.Button("3️⃣ 🎬 AI Clip", variant="stop")
 
                 # Story segments output
                 gr.Markdown("### 📖 Clipped Stories")
@@ -570,7 +575,7 @@ if __name__ == "__main__":
                 )
 
                 # Create video players and transcript textboxes (hidden by CSS when empty)
-                MAX_SEGMENTS = 10
+                # Uses global MAX_SEGMENTS (defined at module level from env var)
                 segment_videos = []
                 segment_transcripts = []
                 for i in range(MAX_SEGMENTS):

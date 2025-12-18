@@ -498,7 +498,7 @@ if __name__ == "__main__":
                             value=(
                                 """
                             Role: You are a professional News Editor and Video Clipper.
-                            Objective: Extract ONLY the hard news segments (reports on crime, politics, accidents, major events) from the SRT subtitles.
+                            Objective: Extract ONLY the hard news segments from the SRT subtitles.
                             Critical Exclusion Rules (What to DELETE):
                             Ignore Ads: Delete all commercial advertisements and sponsorships.
                             Ignore Routine Updates: DELETE all Traffic reports, Weather forecasts, and Stock market/Currency snapshots.

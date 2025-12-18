@@ -52,11 +52,24 @@ GOOGLE_AI_STUDIO_API_KEY=your-gemini-key
 MAX_SEGMENTS=30
 ```
 
+#### 🔐 Web UI Authentication (Optional)
+
+To protect your web interface with a login page, add these to your `.env` file:
+
+```env
+# Web UI Authentication
+USERNAME=your-username
+PASSWORD=your-password
+```
+
+If both `USERNAME` and `PASSWORD` are set, users must enter the correct credentials to access the application. If not set, the web UI will be accessible without authentication.
+
 **Configuration Notes:**
 - `.env` file contains sensitive information, do not commit it to Git
 - Choose any one of the three options, the system will automatically select the appropriate method
 - Trial account provides 10 hours of free processing time per month
 - Gemini API key is used for AI-powered intelligent clipping features
+- `MAX_SEGMENTS` controls the maximum number of video segments that can be displayed (default: 10)
 
 
 <a name="Usage"></a>

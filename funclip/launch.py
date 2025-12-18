@@ -43,6 +43,11 @@ except ValueError:
     logging.warning("Invalid MAX_SEGMENTS value in environment, using default (10)")
     MAX_SEGMENTS = 10
 
+# Authentication - read from environment variables
+# If both USERNAME and PASSWORD are set, users must enter them to access the app
+APP_USERNAME = os.getenv("USERNAME", "")
+APP_PASSWORD = os.getenv("PASSWORD", "")
+
 
 def generate_arm_token(sub_id, rg, account):
     """
@@ -634,6 +639,19 @@ if __name__ == "__main__":
 
     # Start gradio service
     logging.info(f"Starting Gradio server on {server_name}:{port}")
+
+    # Set up authentication if USERNAME and PASSWORD are configured
+    auth = None
+    if APP_USERNAME and APP_PASSWORD:
+        logging.info(f"Authentication enabled (username: {APP_USERNAME})")
+
+        def check_credentials(username, password):
+            return username == APP_USERNAME and password == APP_PASSWORD
+
+        auth = check_credentials
+    else:
+        logging.info("No authentication (USERNAME or PASSWORD env var not set)")
+
     if args.listen:
         funclip_service.launch(
             share=args.share,
@@ -641,8 +659,13 @@ if __name__ == "__main__":
             server_name=server_name,
             inbrowser=False,
             theme=theme,
+            auth=auth,
         )
     else:
         funclip_service.launch(
-            share=args.share, server_port=port, server_name=server_name, theme=theme
+            share=args.share,
+            server_port=port,
+            server_name=server_name,
+            theme=theme,
+            auth=auth,
         )

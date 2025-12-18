@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-# -*- encoding: utf-8 -*-
 # Copyright FunASR (https://github.com/alibaba-damo-academy/FunClip). All Rights Reserved.
 #  MIT License  (https://opensource.org/licenses/MIT)
 
 import argparse
+import sys
 from pathlib import Path
 
 import yaml
-import sys
 
 
 class ArgumentParser(argparse.ArgumentParser):
@@ -34,7 +33,7 @@ class ArgumentParser(argparse.ArgumentParser):
             if not Path(_args.config).exists():
                 self.error(f"No such file: {_args.config}")
 
-            with open(_args.config, "r", encoding="utf-8") as f:
+            with open(_args.config, encoding="utf-8") as f:
                 d = yaml.safe_load(f)
             if not isinstance(d, dict):
                 self.error("Config file has non dict value: {_args.config}")

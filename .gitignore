@@ -4,3 +4,8 @@
 ClipVideo/clipvideo/output
 *__pycache__
 *.spec
+*.rar
+.gradio_temp/
+.venv/
+*.json
+.env

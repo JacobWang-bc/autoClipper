@@ -1,173 +1,473 @@
-#!/usr/bin/env python3
-# -*- encoding: utf-8 -*-
-# Copyright FunASR (https://github.com/alibaba-damo-academy/FunClip). All Rights Reserved.
-#  MIT License  (https://opensource.org/licenses/MIT)
-
-from http import server
-import os
-import logging
 import argparse
+import logging
+import os
+
 import gradio as gr
-from funasr import AutoModel
-from videoclipper import VideoClipper
-from llm.openai_api import openai_call
-from llm.qwen_api import call_qwen_model
-from llm.g4f_openai_api import g4f_openai_call
-from utils.trans_utils import extract_timestamps
+import requests
+from azure_processor import AzureVideoIndexerProcessor
 from introduction import top_md_1, top_md_3, top_md_4
+from llm.gemini_api import gemini_call
+from utils.trans_utils import extract_timestamps_with_text
+
+# Set custom temp directory for Gradio to avoid Windows permission issues
+# Use project directory instead of system temp to avoid antivirus interference
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+GRADIO_TEMP_DIR = os.path.join(SCRIPT_DIR, ".gradio_temp")
+os.makedirs(GRADIO_TEMP_DIR, exist_ok=True)
+os.environ["GRADIO_TEMP_DIR"] = GRADIO_TEMP_DIR
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# Load environment variables from .env file
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+    logging.info("Environment variables loaded from .env file")
+except ImportError:
+    logging.warning(
+        "python-dotenv not installed. Reading from system environment only. Install with: pip install python-dotenv"
+    )
+
+
+def generate_arm_token(sub_id, rg, account):
+    """
+    Generate data-plane access token using Azure Identity (ARM flow).
+    Supports multiple authentication methods via environment variables:
+    1. Service Principal: AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID
+    2. Interactive Browser: Set USE_INTERACTIVE_AUTH=true
+    3. Device Code: Set USE_DEVICE_CODE_AUTH=true
+    4. Default chain (CLI, Managed Identity, etc.)
+    """
+    try:
+        from azure.identity import (
+            ClientSecretCredential,
+            DefaultAzureCredential,
+            DeviceCodeCredential,
+            InteractiveBrowserCredential,
+        )
+    except ImportError as err:
+        logging.error("azure-identity not found.")
+        raise ImportError(
+            "Production-grade token generation requires 'azure-identity'. "
+            "Please install it: pip install azure-identity"
+        ) from err
+
+    logging.info("Generating access token using Azure Identity for account: %s", account)
+
+    try:
+        # Determine which credential to use based on environment variables
+        client_id = os.getenv("AZURE_CLIENT_ID")
+        client_secret = os.getenv("AZURE_CLIENT_SECRET")
+        tenant_id = os.getenv("AZURE_TENANT_ID")
+        use_interactive = os.getenv("USE_INTERACTIVE_AUTH", "").lower().strip()
+        use_device_code = os.getenv("USE_DEVICE_CODE_AUTH", "").lower().strip()
+
+        # Debug logging
+        logging.info("=== Authentication Configuration Debug ===")
+        logging.info(f"AZURE_CLIENT_ID set: {bool(client_id)}")
+        logging.info(f"AZURE_CLIENT_SECRET set: {bool(client_secret)}")
+        logging.info(f"AZURE_TENANT_ID set: {bool(tenant_id)}")
+        logging.info(f"USE_INTERACTIVE_AUTH: '{use_interactive}'")
+        logging.info(f"USE_DEVICE_CODE_AUTH: '{use_device_code}'")
+        logging.info("=========================================")
+
+        # Priority 1: Service Principal (if all three are set)
+        if client_id and client_secret and tenant_id:
+            logging.info("✓ Using Service Principal authentication")
+            cred = ClientSecretCredential(
+                tenant_id=tenant_id, client_id=client_id, client_secret=client_secret
+            )
+        # Priority 2: Interactive Browser
+        elif use_interactive == "true":
+            logging.info("✓ Using Interactive Browser authentication")
+            cred = (
+                InteractiveBrowserCredential(tenant_id=tenant_id)
+                if tenant_id
+                else InteractiveBrowserCredential()
+            )
+        # Priority 3: Device Code
+        elif use_device_code == "true":
+            logging.info("✓ Using Device Code authentication")
+            cred = (
+                DeviceCodeCredential(tenant_id=tenant_id) if tenant_id else DeviceCodeCredential()
+            )
+        # Priority 4: Default credential chain
+        else:
+            logging.warning(
+                "⚠ No explicit auth method configured, falling back to DefaultAzureCredential"
+            )
+            logging.warning("⚠ Recommendation: Add 'USE_INTERACTIVE_AUTH=true' to your .env file")
+            cred = DefaultAzureCredential()
+
+        token_obj = cred.get_token("https://management.azure.com/.default")
+        mgmt_token = token_obj.token
+
+        uri = f"https://management.azure.com/subscriptions/{sub_id}/resourceGroups/{rg}/providers/Microsoft.VideoIndexer/accounts/{account}/generateAccessToken?api-version=2024-01-01"
+
+        headers = {
+            "Authorization": f"Bearer {mgmt_token}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "permissionType": "Contributor",
+            "scope": "Account",
+        }
+
+        response = requests.post(uri, headers=headers, json=payload)
+        response.raise_for_status()
+
+        return response.json()["accessToken"]
+
+    except Exception as e:
+        raise RuntimeError(f"Failed to generate ARM token: {e}") from e
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='argparse testing')
-    parser.add_argument('--lang', '-l', type=str, default = "zh", help="language")
-    parser.add_argument('--share', '-s', action='store_true', help="if to establish gradio share link")
-    parser.add_argument('--port', '-p', type=int, default=7860, help='port number')
-    parser.add_argument('--listen', action='store_true', help="if to listen to all hosts")
+    parser = argparse.ArgumentParser(
+        description="AutoClipper with Azure Video Indexer (reads config from .env by default)"
+    )
+    parser.add_argument("--share", "-s", action="store_true", help="establish gradio share link")
+    parser.add_argument(
+        "--port", "-p", type=int, help="port number (default: 7860 or GRADIO_PORT from env)"
+    )
+    parser.add_argument("--listen", action="store_true", help="listen to all hosts")
+
     args = parser.parse_args()
-    
-    if args.lang == 'zh':
-        funasr_model = AutoModel(model="iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-                                vad_model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-                                punc_model="damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-                                spk_model="damo/speech_campplus_sv_zh-cn_16k-common",
-                                )
-    else:
-        funasr_model = AutoModel(model="iic/speech_paraformer_asr-en-16k-vocab4199-pytorch",
-                                vad_model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-                                punc_model="damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
-                                spk_model="damo/speech_campplus_sv_zh-cn_16k-common",
-                                )
-    audio_clipper = VideoClipper(funasr_model)
-    audio_clipper.lang = args.lang
-    
-    server_name='127.0.0.1'
+
+    # Read all configuration from environment variables
+    # Authentication: Bearer Token (preferred)
+    bearer_token = os.getenv("AZURE_VIDEO_INDEXER_BEARER_TOKEN")
+
+    # ARM auto-generation parameters (if bearer token not provided)
+    arm_subscription_id = os.getenv("ARM_SUBSCRIPTION_ID")
+    arm_resource_group = os.getenv("ARM_RESOURCE_GROUP")
+    arm_account_name = os.getenv("ARM_ACCOUNT_NAME")
+
+    # Classic authentication (fallback)
+    subscription_key = os.getenv("AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY")
+    account_id = os.getenv("AZURE_VIDEO_INDEXER_ACCOUNT_ID")
+    location = os.getenv("AZURE_VIDEO_INDEXER_LOCATION", "trial")
+
+    # Gradio server settings
+    port = args.port or int(os.getenv("GRADIO_PORT", "7860"))
+
+    # Gemini API key from environment (used as default if UI doesn't provide one)
+    default_gemini_api_key = os.getenv("GOOGLE_AI_STUDIO_API_KEY", "")
+
+    # Auto-generate bearer token if ARM params are provided
+    if not bearer_token and arm_subscription_id and arm_resource_group and arm_account_name:
+        logging.info("Auto-generating ARM bearer token...")
+        bearer_token = generate_arm_token(
+            arm_subscription_id,
+            arm_resource_group,
+            arm_account_name,
+        )
+        logging.info("Successfully generated ARM bearer token.")
+
+    # Validate authentication configuration
+    if not bearer_token and not subscription_key:
+        raise ValueError(
+            "Authentication missing. Set environment variables in .env file:\n"
+            "Option 1 (Recommended): ARM Auto-generation\n"
+            "  - ARM_SUBSCRIPTION_ID=<your-subscription-id>\n"
+            "  - ARM_RESOURCE_GROUP=<your-resource-group>\n"
+            "  - ARM_ACCOUNT_NAME=<your-account-name>\n"
+            "  Plus ONE of:\n"
+            "    a) AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID (Service Principal)\n"
+            "    b) USE_INTERACTIVE_AUTH=true (Browser login)\n"
+            "    c) USE_DEVICE_CODE_AUTH=true (Device code)\n\n"
+            "Option 2: Manual Bearer Token\n"
+            "  - AZURE_VIDEO_INDEXER_BEARER_TOKEN=<your-token>\n\n"
+            "Option 3: Classic (Legacy)\n"
+            "  - AZURE_VIDEO_INDEXER_SUBSCRIPTION_KEY=<your-key>\n"
+            "  - AZURE_VIDEO_INDEXER_ACCOUNT_ID=<your-account-id>\n"
+        )
+
+    # Initialize Azure Video Indexer processor
+    logging.info("Initializing Azure Video Indexer Processor...")
+    audio_clipper = AzureVideoIndexerProcessor(
+        subscription_key=subscription_key or "",
+        location=location,
+        account_id=account_id,
+        bearer_token=bearer_token,
+    )
+
+    server_name = "127.0.0.1"
     if args.listen:
-        server_name = '0.0.0.0'
-        
-        
+        server_name = "0.0.0.0"
 
-    def audio_recog(audio_input, sd_switch, hotwords, output_dir):
-        return audio_clipper.recog(audio_input, sd_switch, None, hotwords, output_dir=output_dir)
+    def audio_recog(audio_input, sd_switch):
+        return audio_clipper.recog(audio_input, sd_switch, None, "", output_dir=None)
 
-    def video_recog(video_input, sd_switch, hotwords, output_dir):
-        return audio_clipper.video_recog(video_input, sd_switch, hotwords, output_dir=output_dir)
+    def video_recog(video_input, sd_switch):
+        return audio_clipper.video_recog(video_input, sd_switch, "", output_dir=None)
 
-    def video_clip(dest_text, video_spk_input, start_ost, end_ost, state, output_dir):
-        return audio_clipper.video_clip(
-            dest_text, start_ost, end_ost, state, dest_spk=video_spk_input, output_dir=output_dir
-            )
+    def mix_recog(video_input, audio_input):
+        import shutil
+        import tempfile
+        import time
+        from uuid import uuid4
 
-    def mix_recog(video_input, audio_input, hotwords, output_dir):
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
-        else:
-            output_dir = os.path.abspath(output_dir)
         audio_state, video_state = None, None
         if video_input is not None:
-            res_text, res_srt, video_state = video_recog(
-                video_input, 'No', hotwords, output_dir=output_dir)
-            return res_text, res_srt, video_state, None
+            # Gradio on Windows may lock uploaded video files (ffmpeg conversion/preview),
+            # which can trigger PermissionError when the UI tries to stream the input.
+            # Work around by copying the uploaded file to a safe temp path before processing.
+            src_path = video_input
+            if isinstance(video_input, dict):
+                src_path = video_input.get("path") or video_input.get("name")  # best-effort
+            if not isinstance(src_path, str) or not src_path:
+                raise ValueError(f"Invalid video input: {video_input}")
+
+            suffix = os.path.splitext(src_path)[1] or ".mp4"
+            dst_path = os.path.join(tempfile.gettempdir(), f"autoclipper_{uuid4().hex}{suffix}")
+
+            last_err = None
+            for _ in range(10):
+                try:
+                    shutil.copy2(src_path, dst_path)
+                    last_err = None
+                    break
+                except PermissionError as e:
+                    last_err = e
+                    time.sleep(0.2)
+            if last_err:
+                logging.warning("Failed to copy uploaded video, using original path: %s", last_err)
+                dst_path = src_path
+
+            res_text, res_srt, video_state = video_recog(dst_path, "No")
+            return res_srt, video_state, None
         if audio_input is not None:
-            res_text, res_srt, audio_state = audio_recog(
-                audio_input, 'No', hotwords, output_dir=output_dir)
-            return res_text, res_srt, None, audio_state
-    
-    def mix_recog_speaker(video_input, audio_input, hotwords, output_dir):
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
-        else:
-            output_dir = os.path.abspath(output_dir)
-        audio_state, video_state = None, None
-        if video_input is not None:
-            res_text, res_srt, video_state = video_recog(
-                video_input, 'Yes', hotwords, output_dir=output_dir)
-            return res_text, res_srt, video_state, None
-        if audio_input is not None:
-            res_text, res_srt, audio_state = audio_recog(
-                audio_input, 'Yes', hotwords, output_dir=output_dir)
-            return res_text, res_srt, None, audio_state
-    
-    def mix_clip(dest_text, video_spk_input, start_ost, end_ost, video_state, audio_state, output_dir):
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
-        else:
-            output_dir = os.path.abspath(output_dir)
-        if video_state is not None:
-            clip_video_file, message, clip_srt = audio_clipper.video_clip(
-                dest_text, start_ost, end_ost, video_state, dest_spk=video_spk_input, output_dir=output_dir)
-            return clip_video_file, None, message, clip_srt
-        if audio_state is not None:
-            (sr, res_audio), message, clip_srt = audio_clipper.clip(
-                dest_text, start_ost, end_ost, audio_state, dest_spk=video_spk_input, output_dir=output_dir)
-            return None, (sr, res_audio), message, clip_srt
-    
-    def video_clip_addsub(dest_text, video_spk_input, start_ost, end_ost, state, output_dir, font_size, font_color):
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
-        else:
-            output_dir = os.path.abspath(output_dir)
-        return audio_clipper.video_clip(
-            dest_text, start_ost, end_ost, state, 
-            font_size=font_size, font_color=font_color, 
-            add_sub=True, dest_spk=video_spk_input, output_dir=output_dir
-            )
-        
+            res_text, res_srt, audio_state = audio_recog(audio_input, "No")
+            return res_srt, None, audio_state
+
     def llm_inference(system_content, user_content, srt_text, model, apikey):
-        SUPPORT_LLM_PREFIX = ['qwen', 'gpt', 'g4f', 'moonshot', 'deepseek']
-        if model.startswith('qwen'):
-            return call_qwen_model(apikey, model, user_content+'\n'+srt_text, system_content)
-        if model.startswith('gpt') or model.startswith('moonshot') or model.startswith('deepseek'):
-            return openai_call(apikey, model, system_content, user_content+'\n'+srt_text)
-        elif model.startswith('g4f'):
-            model = "-".join(model.split('-')[1:])
-            return g4f_openai_call(model, system_content, user_content+'\n'+srt_text)
+        SUPPORT_LLM_PREFIX = ["gemini"]
+        # Use UI-provided key if available, otherwise fall back to env default
+        effective_apikey = apikey.strip() if apikey else ""
+        if not effective_apikey:
+            effective_apikey = default_gemini_api_key
+            if effective_apikey:
+                logging.info("Using default Gemini API key from GOOGLE_AI_STUDIO_API_KEY env var")
+        if not effective_apikey:
+            return "Error: No API key provided. Please enter a Gemini API key or set GOOGLE_AI_STUDIO_API_KEY in .env"
+
+        if model.startswith("gemini"):
+            return gemini_call(
+                apikey=effective_apikey,
+                model=model,
+                user_content=user_content + "\n" + srt_text,
+                system_content=system_content,
+            )
         else:
-            logging.error("LLM name error, only {} are supported as LLM name prefix."
-                          .format(SUPPORT_LLM_PREFIX))
-    
-    def AI_clip(LLM_res, dest_text, video_spk_input, start_ost, end_ost, video_state, audio_state, output_dir):
-        timestamp_list = extract_timestamps(LLM_res)
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
+            logging.error(
+                f"LLM name error, only {SUPPORT_LLM_PREFIX} are supported as LLM name prefix."
+            )
+            return "Error: Unsupported model. Please use Gemini models."
+
+    def AI_clip_segments(
+        LLM_res,
+        video_state,
+        audio_state,
+        video_input,
+        srt_text,
+    ):
+        """
+        Clip video/audio into multiple story segments based on LLM result.
+        Returns a list of video paths and a summary message.
+        """
+        logging.info("=" * 60)
+        logging.info("AI_clip_segments called")
+        logging.info(f"video_state: {video_state is not None}")
+        logging.info(f"audio_state: {audio_state is not None}")
+        logging.info(f"video_input: {video_input}")
+        logging.info(f"srt_text length: {len(srt_text) if srt_text else 0}")
+        logging.info("=" * 60)
+
+        # Check if we have valid input
+        has_state = video_state is not None or audio_state is not None
+        has_manual_input = video_input is not None and srt_text and srt_text.strip()
+
+        MAX_SEGMENTS = 10
+
+        if not has_state and not has_manual_input:
+            logging.error("No valid input: neither ASR state nor manual input")
+            results = [None] * MAX_SEGMENTS + [""] * MAX_SEGMENTS
+            results.append(
+                "Error: Please either run ASR, or upload a video AND paste SRT manually."
+            )
+            return results
+
+        # Extract timestamps with associated text from LLM result
+        llm_segments = extract_timestamps_with_text(LLM_res)
+        timestamp_list = [[seg["start_ms"], seg["end_ms"]] for seg in llm_segments]
+
+        logging.info(f"Extracted {len(timestamp_list)} timestamps from LLM result")
+        for i, seg in enumerate(llm_segments):
+            logging.info(
+                f"  Timestamp {i + 1}: {seg['start_ms'] / 1000:.2f}s - {seg['end_ms'] / 1000:.2f}s"
+            )
+            logging.info(
+                f"    Text preview: {seg['text'][:100]}..."
+                if len(seg["text"]) > 100
+                else f"    Text: {seg['text']}"
+            )
+
+        if not timestamp_list:
+            logging.error("No timestamps found in LLM result")
+            results = [None] * MAX_SEGMENTS + [""] * MAX_SEGMENTS
+            results.append("Error: No timestamps found in LLM result.")
+            return results
+
+        # Output directory is not customizable, use default (None)
+        output_dir = None
+
+        segments = []
+        is_video = False
+
+        try:
+            if video_state is not None:
+                logging.info("Mode: Using ASR video state")
+                is_video = True
+                segments = audio_clipper.video_clip_segments(
+                    state=video_state,
+                    output_dir=output_dir,
+                    timestamp_list=timestamp_list,
+                )
+            elif audio_state is not None:
+                logging.info("Mode: Using ASR audio state")
+                is_video = False
+                segments = audio_clipper.audio_clip_segments(
+                    state=audio_state,
+                    output_dir=output_dir,
+                    timestamp_list=timestamp_list,
+                )
+            elif video_input is not None:
+                logging.info("Mode: Manual mode with video file")
+                is_video = True
+                manual_state = {
+                    "video_filename": video_input,
+                    "sentences": [],
+                }
+                segments = audio_clipper.video_clip_segments(
+                    state=manual_state,
+                    output_dir=output_dir,
+                    timestamp_list=timestamp_list,
+                )
+        except Exception as e:
+            logging.error(f"Error clipping segments: {e}", exc_info=True)
+            results = [None] * MAX_SEGMENTS + [""] * MAX_SEGMENTS
+            results.append(f"Error: {str(e)}")
+            return results
+
+        logging.info(f"Total segments clipped: {len(segments)}, is_video: {is_video}")
+
+        # Build video paths and transcripts lists
+        video_paths = []
+        transcripts = []
+        for i, seg in enumerate(segments):
+            video_path = seg.get("video_path")
+            exists = os.path.exists(video_path) if video_path else False
+            file_size = os.path.getsize(video_path) if exists else 0  # type: ignore
+
+            # Get transcript from LLM result (more reliable than ASR-based transcript)
+            llm_text = ""
+            if i < len(llm_segments):
+                llm_text = llm_segments[i].get("text", "")
+
+            # Fallback to segment's own transcript if LLM text is empty
+            srt_content = seg.get("srt", "")
+            transcript = seg.get("transcript", "")
+
+            logging.info(f"Segment {i + 1}:")
+            logging.info(f"  video_path: {video_path}")
+            logging.info(f"  exists: {exists}")
+            logging.info(f"  file_size: {file_size} bytes")
+            logging.info(f"  time range: {seg['start']:.2f}s - {seg['end']:.2f}s")
+            logging.info(f"  llm_text length: {len(llm_text)}")
+            logging.info(f"  transcript length: {len(transcript)}")
+
+            if is_video and exists:
+                video_paths.append(video_path)
+                # Priority: LLM text > SRT > transcript
+                subtitle_text = (
+                    llm_text if llm_text else (srt_content if srt_content else transcript)
+                )
+                transcripts.append(subtitle_text)
+
+        # Build summary message
+        if segments:
+            message = f"✅ Successfully clipped {len(segments)} story(s).\n"
+            for i, seg in enumerate(segments):
+                video_path = seg.get("video_path", "N/A")
+                exists = os.path.exists(video_path) if video_path else False
+                status = "✓" if exists else "✗"
+                message += f"\n{status} Story {i + 1}: {seg['start']:.2f}s - {seg['end']:.2f}s"
+                if exists:
+                    message += f"\n   Path: {video_path}"
         else:
-            output_dir = os.path.abspath(output_dir)
-        if video_state is not None:
-            clip_video_file, message, clip_srt = audio_clipper.video_clip(
-                dest_text, start_ost, end_ost, video_state, 
-                dest_spk=video_spk_input, output_dir=output_dir, timestamp_list=timestamp_list, add_sub=False)
-            return clip_video_file, None, message, clip_srt
-        if audio_state is not None:
-            (sr, res_audio), message, clip_srt = audio_clipper.clip(
-                dest_text, start_ost, end_ost, audio_state, 
-                dest_spk=video_spk_input, output_dir=output_dir, timestamp_list=timestamp_list, add_sub=False)
-            return None, (sr, res_audio), message, clip_srt
-    
-    def AI_clip_subti(LLM_res, dest_text, video_spk_input, start_ost, end_ost, video_state, audio_state, output_dir):
-        timestamp_list = extract_timestamps(LLM_res)
-        output_dir = output_dir.strip()
-        if not len(output_dir):
-            output_dir = None
-        else:
-            output_dir = os.path.abspath(output_dir)
-        if video_state is not None:
-            clip_video_file, message, clip_srt = audio_clipper.video_clip(
-                dest_text, start_ost, end_ost, video_state, 
-                dest_spk=video_spk_input, output_dir=output_dir, timestamp_list=timestamp_list, add_sub=True)
-            return clip_video_file, None, message, clip_srt
-        if audio_state is not None:
-            (sr, res_audio), message, clip_srt = audio_clipper.clip(
-                dest_text, start_ost, end_ost, audio_state, 
-                dest_spk=video_spk_input, output_dir=output_dir, timestamp_list=timestamp_list, add_sub=True)
-            return None, (sr, res_audio), message, clip_srt
-    
+            message = "⚠️ No stories could be clipped."
+
+        logging.info(f"Returning {len(video_paths)} video paths")
+        logging.info("=" * 60)
+
+        # Return: videos (10) + transcripts (10) + message (1) = 21 items
+        results = []
+        # Add video paths
+        for i in range(MAX_SEGMENTS):
+            if i < len(video_paths):
+                results.append(video_paths[i])
+            else:
+                results.append(None)
+        # Add transcripts
+        for i in range(MAX_SEGMENTS):
+            if i < len(transcripts):
+                results.append(transcripts[i])
+            else:
+                results.append("")
+        results.append(message)
+        return results
+
     # gradio interface
     theme = gr.Theme.load("funclip/utils/theme.json")
-    with gr.Blocks(theme=theme) as funclip_service:
+
+    with gr.Blocks() as funclip_service:
+        # Custom CSS for styling
+        gr.HTML("""
+        <style>
+            /* Hide the entire row when the video inside is empty */
+            .video-container:has(.empty[aria-label="Empty value"]) {
+                display: none !important;
+            }
+
+            /* Make video players taller */
+            .video-container video {
+                min-height: 400px !important;
+                height: 400px !important;
+            }
+
+            /* Yellow theme for video container labels */
+            .video-container .label-wrap span {
+                background-color: #f5c542 !important;
+                color: #1a1a1a !important;
+                font-weight: bold !important;
+            }
+
+            /* Yellow border for video players */
+            .video-container .video-container-inner,
+            .video-container .wrap {
+                border: 2px solid #f5c542 !important;
+                border-radius: 8px !important;
+            }
+        </style>
+        """)
         gr.Markdown(top_md_1)
         # gr.Markdown(top_md_2)
         gr.Markdown(top_md_3)
@@ -176,137 +476,145 @@ if __name__ == "__main__":
         with gr.Row():
             with gr.Column():
                 with gr.Row():
-                    video_input = gr.Video(label="视频输入 | Video Input")
-                    audio_input = gr.Audio(label="音频输入 | Audio Input")
+                    # Use File input instead of Video to avoid Windows file-lock issues
+                    # when Gradio converts/previews uploaded videos (PermissionError on output.mp4).
+                    video_input = gr.File(
+                        label="Video Input", file_types=["video"], type="filepath"
+                    )
+                    audio_input = gr.Audio(label="Audio Input")
                 with gr.Column():
-                    gr.Examples(['https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ClipVideo/%E4%B8%BA%E4%BB%80%E4%B9%88%E8%A6%81%E5%A4%9A%E8%AF%BB%E4%B9%A6%EF%BC%9F%E8%BF%99%E6%98%AF%E6%88%91%E5%90%AC%E8%BF%87%E6%9C%80%E5%A5%BD%E7%9A%84%E7%AD%94%E6%A1%88-%E7%89%87%E6%AE%B5.mp4', 
-                                 'https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ClipVideo/2022%E4%BA%91%E6%A0%96%E5%A4%A7%E4%BC%9A_%E7%89%87%E6%AE%B52.mp4', 
-                                 'https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ClipVideo/%E4%BD%BF%E7%94%A8chatgpt_%E7%89%87%E6%AE%B5.mp4'],
-                                [video_input],
-                                label='示例视频 | Demo Video')
-                    gr.Examples(['https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ClipVideo/%E8%AE%BF%E8%B0%88.mp4'],
-                                [video_input],
-                                label='多说话人示例视频 | Multi-speaker Demo Video')
-                    gr.Examples(['https://isv-data.oss-cn-hangzhou.aliyuncs.com/ics/MaaS/ClipVideo/%E9%B2%81%E8%82%83%E9%87%87%E8%AE%BF%E7%89%87%E6%AE%B51.wav'],
-                                [audio_input],
-                                label="示例音频 | Demo Audio")
-                    with gr.Column():
-                        # with gr.Row():
-                            # video_sd_switch = gr.Radio(["No", "Yes"], label="👥区分说话人 Get Speakers", value='No')
-                        hotwords_input = gr.Textbox(label="🚒 热词 | Hotwords(可以为空，多个热词使用空格分隔，仅支持中文热词)")
-                        output_dir = gr.Textbox(label="📁 文件输出路径 | File Output Dir (可以为空，Linux, mac系统可以稳定使用)", value=" ")
-                        with gr.Row():
-                            recog_button = gr.Button("👂 识别 | ASR", variant="primary")
-                            recog_button2 = gr.Button("👂👫 识别+区分说话人 | ASR+SD")
-                video_text_output = gr.Textbox(label="✏️ 识别结果 | Recognition Result")
-                video_srt_output = gr.Textbox(label="📖 SRT字幕内容 | RST Subtitles")
+                    recog_button = gr.Button("ASR (costs money)", variant="primary")
+                video_srt_output = gr.Textbox(
+                    label="SRT Subtitles (can paste manually to skip ASR)",
+                    lines=10,
+                    interactive=True,
+                    placeholder="You can paste SRT content here manually to skip ASR step...",
+                )
             with gr.Column():
-                with gr.Tab("🧠 LLM智能裁剪 | LLM Clipping"):
+                with gr.Tab("LLM Clipping"):
                     with gr.Column():
-                        prompt_head = gr.Textbox(label="Prompt System (按需更改，最好不要变动主体和要求)", value=("你是一个视频srt字幕分析剪辑器，输入视频的srt字幕，"
-                                "分析其中的精彩且尽可能连续的片段并裁剪出来，输出四条以内的片段，将片段中在时间上连续的多个句子及它们的时间戳合并为一条，"
-                                "注意确保文字与时间戳的正确匹配。输出需严格按照如下格式：1. [开始时间-结束时间] 文本，注意其中的连接符是“-”"))
-                        prompt_head2 = gr.Textbox(label="Prompt User（不需要修改，会自动拼接左下角的srt字幕）", value=("这是待裁剪的视频srt字幕："))
+                        prompt_head = gr.Textbox(
+                            label="Prompt System (modify as needed, try not to change the main body and requirements)",
+                            value=(
+                                """
+                            Role: You are a professional News Editor and Video Clipper.
+                            Objective: Extract ONLY the hard news segments (reports on crime, politics, accidents, major events) from the SRT subtitles.
+                            Critical Exclusion Rules (What to DELETE):
+                            Ignore Ads: Delete all commercial advertisements and sponsorships.
+                            Ignore Routine Updates: DELETE all Traffic reports, Weather forecasts, and Stock market/Currency snapshots.
+                            Ignore Intro/Outro: Delete station intros or generic show openers unless they lead immediately into a news story.
+                            Segmentation Logic:
+                            Treat each distinct news story as a separate segment.
+                            Cut when the topic changes (e.g., from a crime story to a political story).
+                            Merge consecutive lines within the same story.
+                            Output Format:
+                            Strictly follow this format:
+                            [start time–end time] Text content of the news story
+                            Note that the connector between the start time and end time must be “–”.hat the connector between the start time and end time must be “–”."""
+                            ),
+                        )
+                        prompt_head2 = gr.Textbox(
+                            label="Prompt User (no need to modify, will automatically concatenate SRT subtitles from bottom left)",
+                            value=("This is the video SRT subtitle to be clipped:"),
+                        )
                         with gr.Column():
                             with gr.Row():
                                 llm_model = gr.Dropdown(
                                     choices=[
-                                        "deepseek-chat"
-                                        "qwen-plus",
-                                             "gpt-3.5-turbo", 
-                                             "gpt-3.5-turbo-0125", 
-                                             "gpt-4-turbo",
-                                             "g4f-gpt-3.5-turbo"], 
-                                    value="deepseek-chat",
+                                        "gemini-3-pro-preview",
+                                        "gemini-3-flash-preview",
+                                    ],
+                                    value="gemini-3-flash-preview",
                                     label="LLM Model Name",
-                                    allow_custom_value=True)
-                                apikey_input = gr.Textbox(label="APIKEY")
-                            llm_button =  gr.Button("LLM推理 | LLM Inference（首先进行识别，非g4f需配置对应apikey）", variant="primary")
-                        llm_result = gr.Textbox(label="LLM Clipper Result")
-                        with gr.Row():
-                            llm_clip_button = gr.Button("🧠 LLM智能裁剪 | AI Clip", variant="primary")
-                            llm_clip_subti_button = gr.Button("🧠 LLM智能裁剪+字幕 | AI Clip+Subtitles")
-                with gr.Tab("✂️ 根据文本/说话人裁剪 | Text/Speaker Clipping"):
-                    video_text_input = gr.Textbox(label="✏️ 待裁剪文本 | Text to Clip (多段文本使用'#'连接)")
-                    video_spk_input = gr.Textbox(label="✏️ 待裁剪说话人 | Speaker to Clip (多个说话人使用'#'连接)")
-                    with gr.Row():
-                        clip_button = gr.Button("✂️ 裁剪 | Clip", variant="primary")
-                        clip_subti_button = gr.Button("✂️ 裁剪+字幕 | Clip+Subtitles")
-                    with gr.Row():
-                        video_start_ost = gr.Slider(minimum=-500, maximum=1000, value=0, step=50, label="⏪ 开始位置偏移 | Start Offset (ms)")
-                        video_end_ost = gr.Slider(minimum=-500, maximum=1000, value=100, step=50, label="⏩ 结束位置偏移 | End Offset (ms)")
-                with gr.Row():
-                    font_size = gr.Slider(minimum=10, maximum=100, value=32, step=2, label="🔠 字幕字体大小 | Subtitle Font Size")
-                    font_color = gr.Radio(["black", "white", "green", "red"], label="🌈 字幕颜色 | Subtitle Color", value='white')
-                    # font = gr.Radio(["黑体", "Alibaba Sans"], label="字体 Font")
-                video_output = gr.Video(label="裁剪结果 | Video Clipped")
-                audio_output = gr.Audio(label="裁剪结果 | Audio Clipped")
-                clip_message = gr.Textbox(label="⚠️ 裁剪信息 | Clipping Log")
-                srt_clipped = gr.Textbox(label="📖 裁剪部分SRT字幕内容 | Clipped RST Subtitles")            
-                
-        recog_button.click(mix_recog, 
-                            inputs=[video_input, 
-                                    audio_input, 
-                                    hotwords_input, 
-                                    output_dir,
-                                    ], 
-                            outputs=[video_text_output, video_srt_output, video_state, audio_state])
-        recog_button2.click(mix_recog_speaker, 
-                            inputs=[video_input, 
-                                    audio_input, 
-                                    hotwords_input, 
-                                    output_dir,
-                                    ], 
-                            outputs=[video_text_output, video_srt_output, video_state, audio_state])
-        clip_button.click(mix_clip, 
-                           inputs=[video_text_input, 
-                                   video_spk_input, 
-                                   video_start_ost, 
-                                   video_end_ost, 
-                                   video_state, 
-                                   audio_state, 
-                                   output_dir
-                                   ],
-                           outputs=[video_output, audio_output, clip_message, srt_clipped])
-        clip_subti_button.click(video_clip_addsub, 
-                           inputs=[video_text_input, 
-                                   video_spk_input, 
-                                   video_start_ost, 
-                                   video_end_ost, 
-                                   video_state, 
-                                   output_dir, 
-                                   font_size, 
-                                   font_color,
-                                   ], 
-                           outputs=[video_output, clip_message, srt_clipped])
-        llm_button.click(llm_inference,
-                         inputs=[prompt_head, prompt_head2, video_srt_output, llm_model, apikey_input],
-                         outputs=[llm_result])
-        llm_clip_button.click(AI_clip, 
-                           inputs=[llm_result,
-                                   video_text_input, 
-                                   video_spk_input, 
-                                   video_start_ost, 
-                                   video_end_ost, 
-                                   video_state, 
-                                   audio_state, 
-                                   output_dir,
-                                   ],
-                           outputs=[video_output, audio_output, clip_message, srt_clipped])
-        llm_clip_subti_button.click(AI_clip_subti, 
-                           inputs=[llm_result,
-                                   video_text_input, 
-                                   video_spk_input, 
-                                   video_start_ost, 
-                                   video_end_ost, 
-                                   video_state, 
-                                   audio_state, 
-                                   output_dir,
-                                   ],
-                           outputs=[video_output, audio_output, clip_message, srt_clipped])
-    
-    # start gradio service in local or share
+                                    allow_custom_value=True,
+                                )
+                                apikey_input = gr.Textbox(
+                                    label="API Key",
+                                    placeholder="Use system default API key if you don't have one",
+                                    type="password",
+                                )
+                            llm_button = gr.Button(
+                                "LLM Inference (recognize first, need Gemini API key)",
+                                variant="primary",
+                            )
+                        llm_result = gr.Textbox(label="LLM Clipper Result", lines=20)
+                        llm_clip_button = gr.Button("🎬 AI Clip", variant="primary")
+
+                # Story segments output
+                gr.Markdown("### 📖 Clipped Stories")
+                clip_segments_message = gr.Textbox(
+                    label="Clipping Summary", lines=12, interactive=False
+                )
+
+                # Create video players and transcript textboxes (hidden by CSS when empty)
+                MAX_SEGMENTS = 10
+                segment_videos = []
+                segment_transcripts = []
+                for i in range(MAX_SEGMENTS):
+                    with gr.Row(elem_classes=["video-container"]):
+                        with gr.Column(scale=2):
+                            vid = gr.Video(
+                                label=f"Story {i + 1}",
+                                interactive=False,
+                            )
+                            segment_videos.append(vid)
+                        with gr.Column(scale=1):
+                            txt = gr.Textbox(
+                                label=f"Transcript {i + 1}",
+                                lines=6,
+                                interactive=False,
+                            )
+                            segment_transcripts.append(txt)
+
+        recog_button.click(
+            mix_recog,
+            inputs=[
+                video_input,
+                audio_input,
+            ],
+            outputs=[video_srt_output, video_state, audio_state],
+        )
+        llm_button.click(
+            llm_inference,
+            inputs=[prompt_head, prompt_head2, video_srt_output, llm_model, apikey_input],
+            outputs=[llm_result],
+        )
+
+        # Helper function to clear all segment videos and transcripts before re-clipping
+        # This forces Gradio to reload files instead of using cached versions
+        def clear_segments():
+            """Clear all video players and transcripts to force reload on next clip."""
+            return [None] * MAX_SEGMENTS + [""] * MAX_SEGMENTS + ["⏳ Clipping in progress..."]
+
+        # AI Clip button - first clear all segments, then run clipping
+        # This two-step approach ensures video players don't show stale cached content
+        llm_clip_button.click(
+            clear_segments,
+            inputs=[],
+            outputs=segment_videos + segment_transcripts + [clip_segments_message],
+        ).then(
+            AI_clip_segments,
+            inputs=[
+                llm_result,
+                video_state,
+                audio_state,
+                video_input,
+                video_srt_output,
+            ],
+            outputs=segment_videos + segment_transcripts + [clip_segments_message],
+        )
+
+    # Start gradio service
+    logging.info(f"Starting Gradio server on {server_name}:{port}")
     if args.listen:
-        funclip_service.launch(share=args.share, server_port=args.port, server_name=server_name, inbrowser=False)
+        funclip_service.launch(
+            share=args.share,
+            server_port=port,
+            server_name=server_name,
+            inbrowser=False,
+            theme=theme,
+        )
     else:
-        funclip_service.launch(share=args.share, server_port=args.port, server_name=server_name)
+        funclip_service.launch(
+            share=args.share, server_port=port, server_name=server_name, theme=theme
+        )

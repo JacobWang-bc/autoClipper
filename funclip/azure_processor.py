@@ -59,19 +59,40 @@ class AzureVideoIndexerProcessor:
 
     def _refresh_token(self) -> bool:
         """
-        Attempt to refresh the bearer token using the callback.
+        Attempt to refresh the bearer token.
+        For Trial accounts (with subscription_key), clears cached token and re-fetches.
+        For ARM accounts, uses the token_refresh_callback.
         Returns True if token was refreshed successfully, False otherwise.
         """
+        # For Trial accounts with subscription_key, we can refresh by clearing cache
+        # and calling _get_access_token() again
+        if self.subscription_key and self.account_id:
+            try:
+                logging.info("Token expired, refreshing via subscription key...")
+                # Clear cached token so _get_access_token() will fetch a new one
+                self.bearer_token = None
+                new_token = self._get_access_token()
+                if new_token:
+                    logging.info("Token refreshed successfully via subscription key")
+                    return True
+                else:
+                    logging.error("Failed to get new token via subscription key")
+                    return False
+            except Exception as e:
+                logging.error(f"Failed to refresh token via subscription key: {e}")
+                return False
+
+        # For ARM accounts, use the callback
         if not self.token_refresh_callback:
             logging.warning("Token expired but no refresh callback is configured")
             return False
 
         try:
-            logging.info("Token expired, attempting to refresh...")
+            logging.info("Token expired, attempting to refresh via callback...")
             new_token = self.token_refresh_callback()
             if new_token:
                 self.bearer_token = new_token
-                logging.info("Token refreshed successfully")
+                logging.info("Token refreshed successfully via callback")
                 return True
             else:
                 logging.error("Token refresh callback returned empty token")

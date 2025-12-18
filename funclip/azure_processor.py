@@ -7,7 +7,7 @@ Process video and audio using Azure Video Indexer API
 import logging
 import os
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import moviepy.editor as mpy
 import numpy as np
@@ -25,6 +25,7 @@ class AzureVideoIndexerProcessor:
         account_id: Optional[str] = None,
         api_version: str = "2024-06-01-preview",
         bearer_token: Optional[str] = None,
+        token_refresh_callback: Optional[Callable[[], Optional[str]]] = None,
     ):
         """
         Initialize Azure Video Indexer processor
@@ -34,6 +35,9 @@ class AzureVideoIndexerProcessor:
             location: Azure region (default: "trial")
             account_id: Azure Video Indexer account ID (optional)
             api_version: API version
+            bearer_token: Bearer token for authentication
+            token_refresh_callback: Optional callback function to refresh token when expired.
+                                   Should return a new bearer token string.
         """
         self.subscription_key = subscription_key
         self.location = location
@@ -42,6 +46,7 @@ class AzureVideoIndexerProcessor:
         self.base_url = f"https://api.videoindexer.ai/{location}"
         # Use ARM data-plane bearer token (generateAccessToken) to avoid classic key flow.
         self.bearer_token = bearer_token
+        self.token_refresh_callback = token_refresh_callback
         self.GLOBAL_COUNT = 0
 
         # If account_id is not provided, try to get it from API
@@ -51,6 +56,76 @@ class AzureVideoIndexerProcessor:
         logging.info(
             f"Azure Video Indexer Processor initialized with account_id: {self.account_id}"
         )
+
+    def _refresh_token(self) -> bool:
+        """
+        Attempt to refresh the bearer token using the callback.
+        Returns True if token was refreshed successfully, False otherwise.
+        """
+        if not self.token_refresh_callback:
+            logging.warning("Token expired but no refresh callback is configured")
+            return False
+
+        try:
+            logging.info("Token expired, attempting to refresh...")
+            new_token = self.token_refresh_callback()
+            if new_token:
+                self.bearer_token = new_token
+                logging.info("Token refreshed successfully")
+                return True
+            else:
+                logging.error("Token refresh callback returned empty token")
+                return False
+        except Exception as e:
+            logging.error(f"Failed to refresh token: {e}")
+            return False
+
+    def _request_with_retry(
+        self,
+        method: str,
+        url: str,
+        max_retries: int = 1,
+        **kwargs,
+    ) -> requests.Response:
+        """
+        Make an HTTP request with automatic token refresh on 401 error.
+
+        Args:
+            method: HTTP method ('get', 'post', etc.)
+            url: Request URL
+            max_retries: Maximum number of retries after token refresh (default: 1)
+            **kwargs: Additional arguments to pass to requests
+
+        Returns:
+            requests.Response object
+
+        Raises:
+            requests.HTTPError: If request fails after retries
+        """
+        request_func = getattr(requests, method.lower())
+
+        for attempt in range(max_retries + 1):
+            response = request_func(url, **kwargs)
+
+            # If not 401, return immediately (success or other error)
+            if response.status_code != 401:
+                return response
+
+            # 401 Unauthorized - try to refresh token
+            if attempt < max_retries:
+                logging.warning(f"Received 401 Unauthorized (attempt {attempt + 1})")
+                if self._refresh_token():
+                    # Update auth params with new token
+                    if "params" in kwargs and "accessToken" in kwargs["params"]:
+                        kwargs["params"]["accessToken"] = self.bearer_token
+                    logging.info("Retrying request with new token...")
+                else:
+                    # Can't refresh, return the 401 response
+                    return response
+            else:
+                logging.error("Max retries reached, returning 401 response")
+
+        return response
 
     def _get_account_id(self) -> str:
         """Get account ID using either subscription key or bearer token"""
@@ -151,9 +226,24 @@ class AzureVideoIndexerProcessor:
         logging.info(f"File format: {ext}, MIME type: {mime_type}")
 
         logging.info("Uploading file...")
-        with open(video_path, "rb") as video_file:
-            files = {"file": (video_name, video_file, mime_type)}
-            response = requests.post(url, params=params, files=files, headers=headers_auth)
+
+        # Upload with retry on 401 (token expired)
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            with open(video_path, "rb") as video_file:
+                files = {"file": (video_name, video_file, mime_type)}
+                response = requests.post(url, params=params, files=files, headers=headers_auth)
+
+            if response.status_code == 401 and attempt < max_retries:
+                logging.warning("Upload failed with 401, attempting token refresh...")
+                if self._refresh_token():
+                    # Update params with new token
+                    access_token = self._get_access_token()
+                    params_auth, headers_auth = self._auth(access_token)
+                    params["accessToken"] = access_token
+                    logging.info("Retrying upload with new token...")
+                    continue
+            break
 
         response.raise_for_status()
         result = response.json()
@@ -220,9 +310,24 @@ class AzureVideoIndexerProcessor:
         logging.info(f"File format: {ext}, MIME type: {mime_type}")
 
         logging.info("Uploading file...")
-        with open(audio_path, "rb") as audio_file:
-            files = {"file": (audio_name, audio_file, mime_type)}
-            response = requests.post(url, params=params, files=files, headers=headers_auth)
+
+        # Upload with retry on 401 (token expired)
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            with open(audio_path, "rb") as audio_file:
+                files = {"file": (audio_name, audio_file, mime_type)}
+                response = requests.post(url, params=params, files=files, headers=headers_auth)
+
+            if response.status_code == 401 and attempt < max_retries:
+                logging.warning("Upload failed with 401, attempting token refresh...")
+                if self._refresh_token():
+                    # Update params with new token
+                    access_token = self._get_access_token()
+                    params_auth, headers_auth = self._auth(access_token)
+                    params["accessToken"] = access_token
+                    logging.info("Retrying upload with new token...")
+                    continue
+            break
 
         response.raise_for_status()
         result = response.json()
@@ -246,8 +351,6 @@ class AzureVideoIndexerProcessor:
         Returns:
             Indexing result
         """
-        access_token = self._get_access_token()
-        params_auth, headers_auth = self._auth(access_token)
         url = f"{self.base_url}/Accounts/{self.account_id}/Videos/{video_id}/Index"
 
         logging.info(f"Waiting for video processing... Video ID: {video_id}")
@@ -260,9 +363,13 @@ class AzureVideoIndexerProcessor:
             check_count += 1
             elapsed = time.time() - start_time
 
+            # Get fresh token for each request (handles token refresh)
+            access_token = self._get_access_token()
+            params_auth, headers_auth = self._auth(access_token)
             params = {}
             params.update(params_auth)
-            response = requests.get(url, params=params, headers=headers_auth)
+
+            response = self._request_with_retry("get", url, params=params, headers=headers_auth)
             response.raise_for_status()
             result = response.json()
 
@@ -323,7 +430,7 @@ class AzureVideoIndexerProcessor:
         url = f"{self.base_url}/Accounts/{self.account_id}/Videos/{video_id}/Index"
         params = {}
         params.update(params_auth)
-        response = requests.get(url, params=params, headers=headers_auth)
+        response = self._request_with_retry("get", url, params=params, headers=headers_auth)
         response.raise_for_status()
         index_result = response.json()
 

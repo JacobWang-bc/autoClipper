@@ -190,6 +190,22 @@ if __name__ == "__main__":
             "  - AZURE_VIDEO_INDEXER_ACCOUNT_ID=<your-account-id>\n"
         )
 
+    # Token refresh callback for automatic token renewal on 401 errors
+    def refresh_bearer_token():
+        """Callback to refresh bearer token when it expires."""
+        if arm_subscription_id and arm_resource_group and arm_account_name:
+            logging.info("Refreshing bearer token via ARM...")
+            new_token = generate_arm_token(
+                arm_subscription_id,
+                arm_resource_group,
+                arm_account_name,
+            )
+            logging.info("Bearer token refreshed successfully")
+            return new_token
+        else:
+            logging.warning("Cannot refresh token: ARM parameters not configured")
+            return None
+
     # Initialize Azure Video Indexer processor
     logging.info("Initializing Azure Video Indexer Processor...")
     audio_clipper = AzureVideoIndexerProcessor(
@@ -197,6 +213,7 @@ if __name__ == "__main__":
         location=location,
         account_id=account_id,
         bearer_token=bearer_token,
+        token_refresh_callback=refresh_bearer_token if bearer_token else None,
     )
 
     server_name = "127.0.0.1"

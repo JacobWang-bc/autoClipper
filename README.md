@@ -58,11 +58,11 @@ To protect your web interface with a login page, add these to your `.env` file:
 
 ```env
 # Web UI Authentication
-USERNAME=your-username
-PASSWORD=your-password
+GRADIO_USERNAME=your-username
+GRADIO_PASSWORD=your-password
 ```
 
-If both `USERNAME` and `PASSWORD` are set, users must enter the correct credentials to access the application. If not set, the web UI will be accessible without authentication.
+If both `GRADIO_USERNAME` and `GRADIO_PASSWORD` are set, users must enter the correct credentials to access the application. If not set, the web UI will be accessible without authentication.
 
 **Configuration Notes:**
 - `.env` file contains sensitive information, do not commit it to Git

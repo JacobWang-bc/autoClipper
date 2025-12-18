@@ -3,6 +3,7 @@ import logging
 import os
 
 import gradio as gr
+import librosa
 import requests
 from azure_processor import AzureVideoIndexerProcessor
 from introduction import top_md_1, top_md_3, top_md_4
@@ -44,9 +45,10 @@ except ValueError:
     MAX_SEGMENTS = 10
 
 # Authentication - read from environment variables
-# If both USERNAME and PASSWORD are set, users must enter them to access the app
-APP_USERNAME = os.getenv("USERNAME", "")
-APP_PASSWORD = os.getenv("PASSWORD", "")
+# If both GRADIO_USERNAME and GRADIO_PASSWORD are set, users must enter them to access the app
+# Note: Using GRADIO_ prefix to avoid conflict with Windows system USERNAME variable
+APP_USERNAME = os.getenv("GRADIO_USERNAME", "")
+APP_PASSWORD = os.getenv("GRADIO_PASSWORD", "")
 
 
 def generate_arm_token(sub_id, rg, account):
@@ -310,6 +312,7 @@ if __name__ == "__main__":
         video_state,
         audio_state,
         video_input,
+        audio_input,
         srt_text,
     ):
         """
@@ -321,12 +324,15 @@ if __name__ == "__main__":
         logging.info(f"video_state: {video_state is not None}")
         logging.info(f"audio_state: {audio_state is not None}")
         logging.info(f"video_input: {video_input}")
+        logging.info(f"audio_input: {audio_input}")
         logging.info(f"srt_text length: {len(srt_text) if srt_text else 0}")
         logging.info("=" * 60)
 
         # Check if we have valid input
         has_state = video_state is not None or audio_state is not None
-        has_manual_input = video_input is not None and srt_text and srt_text.strip()
+        has_video_manual = video_input is not None and srt_text and srt_text.strip()
+        has_audio_manual = audio_input is not None and srt_text and srt_text.strip()
+        has_manual_input = has_video_manual or has_audio_manual
 
         # Use global MAX_SEGMENTS (defined at module level from env var)
 
@@ -394,6 +400,26 @@ if __name__ == "__main__":
                     output_dir=output_dir,
                     timestamp_list=timestamp_list,
                 )
+            elif audio_input is not None:
+                logging.info("Mode: Manual mode with audio file")
+                is_video = False
+                # For audio input, we need to load it and create a state
+                # audio_input can be a tuple (sample_rate, data) or a filepath
+                if isinstance(audio_input, tuple):
+                    sr, audio_data = audio_input
+                else:
+                    # It's a filepath
+                    audio_data, sr = librosa.load(audio_input, sr=16000)
+
+                manual_state = {
+                    "audio_input": (sr, audio_data),
+                    "sentences": [],
+                }
+                segments = audio_clipper.audio_clip_segments(
+                    state=manual_state,
+                    output_dir=output_dir,
+                    timestamp_list=timestamp_list,
+                )
         except Exception as e:
             logging.error(f"Error clipping segments: {e}", exc_info=True)
             results = [None] * MAX_SEGMENTS + [""] * MAX_SEGMENTS
@@ -427,7 +453,7 @@ if __name__ == "__main__":
             logging.info(f"  llm_text length: {len(llm_text)}")
             logging.info(f"  transcript length: {len(transcript)}")
 
-            if is_video and exists:
+            if exists:
                 video_paths.append(video_path)
                 # Priority: LLM text > SRT > transcript
                 subtitle_text = (
@@ -632,6 +658,7 @@ if __name__ == "__main__":
                 video_state,
                 audio_state,
                 video_input,
+                audio_input,
                 video_srt_output,
             ],
             outputs=segment_videos + segment_transcripts + [clip_segments_message],

@@ -1052,12 +1052,18 @@ class AzureVideoIndexerProcessor:
 
         Returns:
             List of dictionaries, each containing:
+                - 'audio_path': Path to the clipped audio file
                 - 'audio_data': Tuple of (sample_rate, audio_array)
                 - 'transcript': Transcript text for this segment
                 - 'srt': SRT subtitle for this segment
                 - 'start': Start time in seconds
                 - 'end': End time in seconds
         """
+        import tempfile
+        import uuid
+
+        import soundfile as sf
+
         audio_input = state.get("audio_input")
         if not audio_input:
             raise ValueError("Audio input not found in state")
@@ -1068,6 +1074,9 @@ class AzureVideoIndexerProcessor:
 
         if not timestamp_list:
             return segments
+
+        # Generate unique prefix for this batch
+        batch_id = uuid.uuid4().hex[:16]
 
         for i, ts in enumerate(timestamp_list):
             start_sec = ts[0] / 1000.0 + start_ost / 1000.0
@@ -1087,6 +1096,22 @@ class AzureVideoIndexerProcessor:
             # Extract audio segment
             audio_segment = data[start_sample:end_sample]
 
+            # Save audio segment to file
+            segment_filename = f"autoclipper_{batch_id}_segment_{i + 1}.wav"
+            if output_dir:
+                os.makedirs(output_dir, exist_ok=True)
+                segment_path = os.path.join(output_dir, segment_filename)
+            else:
+                segment_path = os.path.join(tempfile.gettempdir(), segment_filename)
+
+            logging.info(
+                f"Clipping audio segment {i + 1}: {start_sec:.2f}s - {end_sec:.2f}s -> {segment_path}"
+            )
+
+            # Write audio file
+            sf.write(segment_path, audio_segment, sr)
+            logging.info(f"Audio segment {i + 1} saved successfully")
+
             # Generate transcript and SRT for this segment
             srt_clip, _, _ = generate_srt_clip(sentences, start_sec, end_sec, begin_index=0)
 
@@ -1105,6 +1130,8 @@ class AzureVideoIndexerProcessor:
 
             segments.append(
                 {
+                    "audio_path": segment_path,
+                    "video_path": segment_path,  # For compatibility with video processing code
                     "audio_data": (sr, audio_segment),
                     "transcript": transcript_text.strip(),
                     "srt": srt_clip,
